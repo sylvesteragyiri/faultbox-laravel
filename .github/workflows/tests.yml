@@ -98,7 +98,22 @@ jobs:
           FAULTBOX_SECRET="ci-$(openssl rand -hex 24)" \
           FAULTBOX_ADMIN_EMAIL=ci@example.com FAULTBOX_ADMIN_PASSWORD=ci-password-123 \
             ./faultbox > /tmp/faultbox.log 2>&1 &
-          for i in $(seq 1 30); do curl -fsS localhost:8080/ready >/dev/null && break; sleep 1; done
+
+          ready=""
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' localhost:8080/ready || true)
+            [ "$code" = "200" ] && { ready=1; break; }
+            sleep 1
+          done
+          if [ -z "$ready" ]; then
+            if [ "$code" = "404" ]; then
+              echo "::error::The Faultbox server has no /ready endpoint (HTTP 404). The checked-out server ($(cd server && git rev-parse --short HEAD)) predates M1; push the server's main branch, which needs the M1+ ingestion API."
+            else
+              echo "::error::The Faultbox server did not become ready (last /ready status: ${code:-none})."
+            fi
+            cat /tmp/faultbox.log
+            exit 1
+          fi
 
           jar=/tmp/jar
           token() { grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//'; }
