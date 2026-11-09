@@ -70,6 +70,7 @@ class FaultboxServiceProvider extends ServiceProvider
         $this->registerNotificationMonitoring();
         $this->registerMailMonitoring();
         $this->registerCommandMonitoring();
+        $this->registerCacheMonitoring();
         $this->registerOctane();
 
         // Web requests buffer events; send them once the response is out.
@@ -144,6 +145,28 @@ class FaultboxServiceProvider extends ServiceProvider
             fn () => $monitor()?->sending($e->message, is_array($e->data ?? null) ? $e->data : [])
         ));
         $events->listen('Illuminate\Mail\Events\MessageSent', fn () => self::safely(fn () => $monitor()?->sent()));
+    }
+
+    /** Cache hits, misses, writes and deletes, counted in memory until the flush. */
+    private function registerCacheMonitoring(): void
+    {
+        if (! $this->app['config']->get('faultbox.cache.enabled', true)) {
+            return;
+        }
+        $events = $this->app->make('events');
+        $app = $this->app;
+        foreach ([
+            'Illuminate\Cache\Events\CacheHit' => 'hits',
+            'Illuminate\Cache\Events\CacheMissed' => 'misses',
+            'Illuminate\Cache\Events\KeyWritten' => 'writes',
+            'Illuminate\Cache\Events\KeyForgotten' => 'deletes',
+            'Illuminate\Cache\Events\KeyWriteFailed' => 'failures',
+            'Illuminate\Cache\Events\KeyForgetFailed' => 'failures',
+        ] as $event => $counter) {
+            $events->listen($event, static fn ($e) => self::safely(
+                static fn () => $app->make(Client::class)->cache()?->record($counter, $e->storeName ?? null, $e->key ?? null)
+            ));
+        }
     }
 
     /** Artisan commands, scheduled ones included. */

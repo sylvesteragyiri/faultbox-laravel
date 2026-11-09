@@ -125,6 +125,23 @@ return [
         'enabled' => env('FAULTBOX_MAIL_ENABLED', true),
     ],
 
+    /*
+    |--------------------------------------------------------------------------
+    | Cache
+    |--------------------------------------------------------------------------
+    |
+    | Hits, misses, writes and deletes are counted per store and key pattern
+    | and sent as totals with each flush; never values. Keys are reduced to
+    | patterns first (users:42:profile becomes users:*:profile). Keys matching
+    | the ignore list below (Laravel's own bookkeeping) aren't counted.
+    |
+    */
+
+    'cache' => [
+        'enabled' => env('FAULTBOX_CACHE_ENABLED', true),
+        'ignore' => ['illuminate:*', 'framework/schedule*', 'laravel:pulse:*', 'telescope:*', 'faultbox*'],
+    ],
+
     'commands' => [
         'enabled' => env('FAULTBOX_COMMANDS_ENABLED', true),
         'ignore' => [

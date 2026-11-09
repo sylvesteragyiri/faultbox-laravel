@@ -29,6 +29,8 @@ class ServerContractTest extends TestCase
             'faultbox.environment' => getenv('FAULTBOX_E2E_ENVIRONMENT') ?: 'testing',
             'faultbox.release' => 'e2e-' . date('Ymd'),
             'faultbox.retries' => 2,
+            'faultbox.cache.interval' => 0, // no pooling: send cache totals with each flush
+            'cache.default' => 'array',
         ];
         parent::setUp();
     }
@@ -139,6 +141,19 @@ class ServerContractTest extends TestCase
         $response = $this->client()->sendNow(Client::TELEMETRY_PATH, $batches[0]);
         $this->assertSame(202, $response->status, "telemetry: {$response->status} {$response->body}");
         $this->assertStringContainsString('"count":3', $response->body);
+    }
+
+    public function test_cache_totals_are_accepted(): void
+    {
+        \Illuminate\Support\Facades\Cache::remember('users:42:profile', 60, fn () => 'a');
+        \Illuminate\Support\Facades\Cache::get('users:42:profile');
+        $batches = $this->client()->telemetryBatches();
+        $this->assertCount(1, $batches);
+        $this->assertSame('users:*:profile', $batches[0]['cache'][0]['key']);
+
+        $response = $this->client()->sendNow(Client::TELEMETRY_PATH, $batches[0]);
+        $this->assertSame(202, $response->status, "cache: {$response->status} {$response->body}");
+        $this->assertStringContainsString('"count":1', $response->body);
     }
 
     public function test_wrong_key_is_rejected_without_throwing(): void

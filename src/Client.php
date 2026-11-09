@@ -72,6 +72,14 @@ class Client
     /** Records artisan commands; null when command monitoring is off. */
     private ?CommandMonitor $commands = null;
 
+    /** Counts cache operations; null when cache monitoring is off. */
+    private ?CacheMonitor $cache = null;
+
+    /** Pools cache totals across processes, so they go out once a minute. */
+    private ?Support\CachePool $cachePool = null;
+
+    private int $droppedCache = 0;
+
     public function __construct(
         private readonly Application $app,
         private readonly EventFactory $events,
@@ -193,7 +201,7 @@ class Client
      * Delivery health in this process: whether the circuit breaker is open,
      * until when, and how many events were dropped to protect the app.
      *
-     * @return array{breaker_open: bool, paused_until: ?float, dropped_by_breaker: int, dropped_by_budget: int, dropped_notifications: int, dropped_mails: int, dropped_commands: int}
+     * @return array{breaker_open: bool, paused_until: ?float, dropped_by_breaker: int, dropped_by_budget: int, dropped_notifications: int, dropped_mails: int, dropped_commands: int, dropped_cache: int}
      */
     public function stats(): array
     {
@@ -205,6 +213,7 @@ class Client
             'dropped_notifications' => $this->notifications?->dropped() ?? 0,
             'dropped_mails' => $this->mails?->dropped() ?? 0,
             'dropped_commands' => $this->commands?->dropped() ?? 0,
+            'dropped_cache' => $this->droppedCache,
         ];
     }
 
@@ -234,9 +243,17 @@ class Client
         return $this->commands;
     }
 
+    /** @internal The cache monitor, or null when cache monitoring is off. */
+    public function cache(): ?CacheMonitor
+    {
+        return $this->cache;
+    }
+
     /**
      * @internal Settles the monitors and returns the telemetry batches to
      * send: usually one, more only when a list passes the server's limit.
+     * Cache totals are pooled across processes and only included when the
+     * pool is due.
      *
      * @return list<array>
      */
@@ -246,6 +263,7 @@ class Client
             'notifications' => array_chunk($this->notifications?->drainItems() ?? [], self::MAX_PER_LIST),
             'mails' => array_chunk($this->mails?->drainItems() ?? [], self::MAX_PER_LIST),
             'commands' => array_chunk($this->commands?->drainItems() ?? [], self::MAX_PER_LIST),
+            'cache' => array_chunk($this->cacheItems(), self::MAX_PER_LIST),
         ];
         $count = max(array_map('count', $lists));
         if ($count === 0) {
@@ -278,6 +296,41 @@ class Client
         $this->commands = ($config['commands']['enabled'] ?? true)
             ? new CommandMonitor((array) ($config['commands']['ignore'] ?? CommandMonitor::DEFAULT_IGNORE))
             : null;
+        $this->cache = ($config['cache']['enabled'] ?? true)
+            ? new CacheMonitor((array) ($config['cache']['ignore'] ?? CacheMonitor::DEFAULT_IGNORE))
+            : null;
+        if ($this->cache !== null) {
+            $path = $config['cache']['pool_path'] ?? null;
+            $this->cachePool = new Support\CachePool(
+                is_string($path) && $path !== ''
+                    ? $path
+                    : Support\CachePool::defaultPath(md5(($config['dsn'] ?? '') . "\0" . ($config['api_key'] ?? '') . "\0" . $this->events->batchEnvironment())),
+                (float) ($config['cache']['interval'] ?? 60),
+                CacheMonitor::OTHER,
+            );
+        }
+    }
+
+    /** Cache totals to send now: the pool's contents when it's due. */
+    private function cacheItems(): array
+    {
+        if ($this->cache === null || $this->cachePool === null) {
+            return [];
+        }
+        $counts = $this->cache->drainCounts();
+        if ($counts === []) {
+            return [];
+        }
+        try {
+            $due = $this->cachePool->add($counts, ($this->clock)());
+        } catch (\RuntimeException) {
+            $this->droppedCache += count($counts);
+
+            return [];
+        }
+        $timestamp = (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d\TH:i:s.v\Z');
+
+        return array_map(static fn (array $count) => ['timestamp' => $timestamp] + $count, $due);
     }
 
     /** @internal Replaces the circuit breaker (tests, and the service provider). */

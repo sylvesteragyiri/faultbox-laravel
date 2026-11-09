@@ -78,6 +78,12 @@ final class FakeTransport implements Transport
         return $this->telemetryItems('commands');
     }
 
+    /** @return list<array> cache totals per store and key pattern, across batches */
+    public function cache(): array
+    {
+        return $this->telemetryItems('cache');
+    }
+
     private function telemetryItems(string $list): array
     {
         return array_merge([], ...array_map(static fn (array $b) => $b[$list] ?? [], $this->telemetryBatches()));

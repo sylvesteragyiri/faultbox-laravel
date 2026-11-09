@@ -19,6 +19,8 @@ abstract class TestCase extends Orchestra
         // Keep breaker state per test: the default "auto" store would share
         // it between tests through a file in the temp directory.
         'faultbox.circuit_breaker.store' => 'memory',
+        // Likewise the cache pool; CacheMonitorTest turns cache monitoring on.
+        'faultbox.cache.enabled' => false,
     ];
 
     protected function getPackageProviders($app): array

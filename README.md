@@ -65,6 +65,16 @@ Long-running and noisy commands are ignored: `queue:work`, `queue:listen`, `sche
 
 Turn it off with `FAULTBOX_COMMANDS_ENABLED=false`.
 
+## Cache
+
+Cache hits, misses, writes, deletes and failed writes are shown under **Cache**, per store and key pattern, with the hit rate of each. That makes it easy to spot a key that's almost always missed, or a store whose writes fail.
+
+- **Key patterns, not keys:** keys are reduced in your app before anything is sent. Numbers, UUIDs, emails, and long tokens or hashes that contain a digit become `*`, so `users:42:profile` is counted as `users:*:profile`. Values are never sent.
+- **Once a minute, not once a request:** operations are counted in memory, and the totals of every PHP process on the server are pooled in one small file in the temp directory. Whichever process finds the pool more than a minute old sends it, after its response. So a busy server sends about one small batch a minute, however many requests read the cache (sessions included). If the temp directory isn't writable, the totals are dropped, and `stats()['dropped_cache']` counts them.
+- **Laravel's bookkeeping is ignored:** `illuminate:*` (read by every queue worker loop), `framework/schedule*` and a few more. Change the list in `config/faultbox.php` (`cache.ignore`; matched against the raw key, `*` is a wildcard).
+
+Turn it off with `FAULTBOX_CACHE_ENABLED=false`.
+
 ## Manual reporting and context
 
 ```php
@@ -118,6 +128,7 @@ php artisan vendor:publish --tag=faultbox-config
 | `FAULTBOX_QUEUE_ENABLED` | `true` | |
 | `FAULTBOX_NOTIFICATIONS_ENABLED` | `true` | Report Laravel notifications. |
 | `FAULTBOX_MAIL_ENABLED` | `true` | Report mail sent directly (Mailables, `Mail::raw`). |
+| `FAULTBOX_CACHE_ENABLED` | `true` | Report cache totals per store and key pattern, about once a minute. Ignored keys: `cache.ignore` in the config file. |
 | `FAULTBOX_COMMANDS_ENABLED` | `true` | Report artisan command runs. Ignored commands: `commands.ignore` in the config file. |
 | `FAULTBOX_QUEUE_REPORT_ATTEMPTS` | `false` | |
 | `FAULTBOX_QUEUE_REPORT_JOB_EXCEPTIONS` | `false` | |
@@ -145,9 +156,9 @@ $this->assertCount(1, $fake->queueFailures());
 
 An error tracker must never become the outage. These are the package's guarantees, and the tests that check them.
 
-### No traffic unless something goes wrong
+### No traffic unless there's something to report
 
-The package makes an HTTP call only when it reports something: an exception, a message or a failed job. A request or job that runs without errors makes **no network calls at all**. The only cost is a few in-memory event listeners. Nothing is sent per request, per query or per job, so a misconfigured DSN can't slow down healthy traffic.
+The package makes an HTTP call only when it has something to report: an exception, a message, a failed job, or a notification, email or artisan command run. Cache totals, the only busy signal, are pooled across processes and sent at most about once a minute per server. A request that throws nothing, sends nothing and only reads the cache makes **no network call**. Nothing is ever sent per query or per cache operation, so a misconfigured DSN can't slow down healthy traffic, and every send happens after the response.
 
 ### Your users never wait for it
 

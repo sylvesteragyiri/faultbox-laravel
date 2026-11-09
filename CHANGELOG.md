@@ -24,7 +24,7 @@ First release, for Faultbox server API v1.
   - **Guarded hooks:** every Laravel hook, including building the client, runs inside a `try/catch`.
   - **Streams fallback:** without curl, connecting is capped at the connect timeout.
   - **`Client::stats()`** reports breaker state and dropped events.
-- **Telemetry batches:** notifications, mail and commands go out together, one `POST /api/v1/telemetry` per flush (after the response, after each job, at shutdown), under the circuit breaker and time budget. Needs a Faultbox server with migration `00008`.
+- **Telemetry batches:** notifications, mail and commands go out together, one `POST /api/v1/telemetry` per flush (after the response, after each job, at shutdown), under the circuit breaker and time budget. Needs a Faultbox server with migrations `00008` and `00009`.
 - **Laravel notification monitoring:** every notification per channel, sent or failed.
   - Thrown channel failures are attributed to their exception.
   - Cancelled sends aren't counted.
@@ -33,5 +33,7 @@ First release, for Faultbox server API v1.
 - **Mail monitoring:** Mailables and `Mail::raw`, sent or failed, per Mailable and mailer. Notification mail is skipped. Only the class, mailer and recipient count are sent. `FAULTBOX_MAIL_ENABLED`.
 - **Artisan command monitoring:** name, exit code, duration and the exception a command threw. Arguments are never sent. Workers and noisy built-ins are ignored (`commands.ignore`). `FAULTBOX_COMMANDS_ENABLED`.
   - `FakeTransport::telemetryBatches()`, `mails()` and `commands()` for tests.
+- **Cache monitoring:** hits, misses, writes, deletes and failed writes per store and key pattern. Keys are reduced to patterns in the app (IDs, UUIDs, emails and hashes become `*`); values are never sent. Totals are pooled across processes in a temp file and sent at most once a minute. Laravel's own keys are ignored (`cache.ignore`). `FAULTBOX_CACHE_ENABLED`.
+  - `FakeTransport::cache()` for tests; `stats()['dropped_cache']`.
 - **`php artisan faultbox:test`** to check the setup. It tests even while sending is paused.
 - **`Faultbox::fake()`** for application tests.
