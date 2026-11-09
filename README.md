@@ -7,7 +7,7 @@ Reports exceptions and failed queue jobs from Laravel 12 and 13 to a self-hosted
   - a job that used up its retries,
   - a job that called `$this->fail()`,
   - an attempt that will be retried.
-- **Never slows down a request:** in web requests, events are sent after the response has gone to the browser. Delivery uses short timeouts and never throws, so a tracker outage can't break a request or a job.
+- **Never slows down a request:** it only sends when something goes wrong, and in web requests only after the response has gone to the browser. A circuit breaker and strict time limits mean a Faultbox outage costs at most one short timeout per minute. See [Safety](#safety-it-never-slows-down-or-breaks-your-app).
 - **Private by default:**
   - Only an allowlist of request headers is sent, and only the user's ID.
   - Values under keys like `password`, `token` and `secret` are redacted everywhere.
@@ -35,6 +35,17 @@ php artisan faultbox:test
 ```
 
 Reporting stays off until both `FAULTBOX_DSN` and `FAULTBOX_API_KEY` are set, so local machines and CI stay quiet unless you configure them.
+
+## Laravel notifications
+
+Every notification your app sends is reported automatically, per channel: mail, database, broadcast, Slack, SMS and custom channels. Faultbox shows them under **App notifications**, with failures and their reasons.
+
+- **Failures are caught either way:** a channel that throws (the mail channel does when SMTP fails) counts as failed, with the exception as the reason. So does one that fires `NotificationFailed`.
+- **Cancelled sends don't count:** a send stopped by a `NotificationSending` listener isn't counted.
+- **Private:** only class names are sent: the notification, the channel and the notifiable's type. Never recipients, addresses or message content.
+- **Cheap:** notifications are batched and sent with the other events after the response, or after each queue job, in one request per flush. The circuit breaker and time budget apply.
+
+Turn it off with `FAULTBOX_NOTIFICATIONS_ENABLED=false`.
 
 ## Manual reporting and context
 
@@ -81,9 +92,13 @@ php artisan vendor:publish --tag=faultbox-config
 | `FAULTBOX_ENVIRONMENT` | `APP_ENV` | If the project lists environments, only those are accepted. |
 | `FAULTBOX_RELEASE` | — | |
 | `FAULTBOX_TIMEOUT` / `FAULTBOX_CONNECT_TIMEOUT` | `2.0` / `1.0` s | Per delivery. |
-| `FAULTBOX_RETRIES` | `1` | Retries on `429`, `503` or network errors. Each retry waits at most 1 s. |
+| `FAULTBOX_RETRIES` | `1` | Retries on `429`, `503` or fast network errors (never after a timeout). Each retry waits at most 1 s. |
+| `FAULTBOX_FLUSH_BUDGET` | `3.0` s | The most time one request, job or command spends sending. |
+| `FAULTBOX_BREAKER_COOLDOWN` | `60` s | How long sending pauses after Faultbox fails. `0` turns the breaker off. |
+| `FAULTBOX_BREAKER_STORE` | `auto` | Where the pause is shared: `auto`, `apcu`, `file` or `memory`. |
 | `FAULTBOX_SEND_USER_ID` | `true` | Sends `auth()->id()` only. |
 | `FAULTBOX_QUEUE_ENABLED` | `true` | |
+| `FAULTBOX_NOTIFICATIONS_ENABLED` | `true` | Report Laravel notifications. |
 | `FAULTBOX_QUEUE_REPORT_ATTEMPTS` | `false` | |
 | `FAULTBOX_QUEUE_REPORT_JOB_EXCEPTIONS` | `false` | |
 
@@ -105,6 +120,84 @@ $fake->assertSent(fn (array $event) => $event['context']['order_id'] === 42);
 $this->assertCount(1, $fake->queueFailures());
 // $fake->assertNothingSent();
 ```
+
+## Safety: it never slows down or breaks your app
+
+An error tracker must never become the outage. These are the package's guarantees, and the tests that check them.
+
+### No traffic unless something goes wrong
+
+The package makes an HTTP call only when it reports something: an exception, a message or a failed job. A request or job that runs without errors makes **no network calls at all**. The only cost is a few in-memory event listeners. Nothing is sent per request, per query or per job, so a misconfigured DSN can't slow down healthy traffic.
+
+### Your users never wait for it
+
+In web requests, including Octane, events are buffered and sent **after the response has been sent**. Console commands and queue workers send straight away, within the limits below.
+
+### Package errors never reach your code
+
+Every hook into Laravel runs inside a `try/catch`, and so does building the client:
+- the exception handler;
+- queue events;
+- Octane events;
+- request termination and shutdown.
+
+A bug in the package, a broken config value or a strange response from Faultbox is dropped silently (`ResilienceTest::test_a_broken_client_never_breaks_exception_handling`).
+
+### Strict limits on every send
+
+| Limit | Default | Setting |
+|---|---|---|
+| Connect timeout | 1 s | `FAULTBOX_CONNECT_TIMEOUT` |
+| Whole request | 2 s | `FAULTBOX_TIMEOUT` |
+| Retries | 1, only on `429`, `503` or a *fast* network error; never after a timeout | `FAULTBOX_RETRIES` |
+| Time spent sending per request, job or command | 3 s, then the rest is dropped | `FAULTBOX_FLUSH_BUDGET` |
+| Events per request | 50 | `max_events_per_request` |
+| Redirects | never followed | — |
+
+### Circuit breaker: an outage costs one timeout, not one per event
+
+When Faultbox doesn't answer (a network failure, a timeout or a `5xx`), the package **stops sending for 60 seconds**. Events during the pause are dropped and counted, and no network call is attempted. After the pause, the next event is a trial: success resumes sending, failure pauses again. A rate limit (`429`) pauses only for as long as Faultbox asks. Client errors such as a revoked key (`401`) don't pause sending, because Faultbox is up and answers instantly.
+
+What an outage costs your app, per worker:
+
+| Faultbox is | Without the breaker | With the breaker |
+|---|---|---|
+| Stopped (connection refused) | ~0.2 s per event | one ~0.2 s hit, then nothing for 60 s |
+| Unreachable (packets dropped) | ~2 s per event | one ~1 s hit (connect timeout) per 60 s |
+| Hanging (accepts, never answers) | ~4 s per event | one ~2 s hit (no retry after a timeout) per 60 s |
+
+Tested against real sockets:
+- 50 events with nothing listening finish in under 1.5 s;
+- 20 events against a server that never answers cost a single timeout.
+
+The pause is shared between processes where possible, so short-lived PHP-FPM workers also learn that Faultbox is down:
+
+| `FAULTBOX_BREAKER_STORE` | Shared by |
+|---|---|
+| `auto` (default) | APCu if enabled (a PHP-FPM pool), otherwise a small file in the system temp directory (every process on the machine or container) |
+| `apcu` | The PHP-FPM pool; per process if APCu is off |
+| `file` | Every process on the machine or container |
+| `memory` | This process only: fine for Octane and queue workers, which are long-lived |
+
+The store is always local (memory, APCu or a temp file), never Redis or a database. A broken store must not slow the app down either.
+
+`FAULTBOX_BREAKER_COOLDOWN` sets the pause in seconds (default `60`); `0` turns the breaker off.
+
+`php artisan faultbox:test` ignores a pause, so you can check the setup while Faultbox is recovering. A successful test resumes sending.
+
+### Turning it off
+
+- `FAULTBOX_ENABLED=false` turns everything off.
+- Removing `FAULTBOX_DSN` or `FAULTBOX_API_KEY` does the same: the package then never opens a connection.
+
+### Checking delivery health
+
+```php
+app(\Faultbox\Laravel\Client::class)->stats();
+// ['breaker_open' => false, 'paused_until' => null, 'dropped_by_breaker' => 0, 'dropped_by_budget' => 0]
+```
+
+Install the `curl` extension. Without it, the package falls back to PHP streams, which is slower but still capped at the connect timeout.
 
 ## Laravel Octane
 

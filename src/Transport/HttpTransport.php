@@ -99,7 +99,18 @@ final class HttpTransport implements Transport
             'follow_location' => 0,
         ]]);
 
-        $result = @file_get_contents($url, false, $context);
+        // The http wrapper's "timeout" is a read timeout; connecting uses
+        // default_socket_timeout (60 s by default). Cap it at the connect
+        // timeout so an unreachable host can't hang the worker.
+        $previous = ini_get('default_socket_timeout');
+        ini_set('default_socket_timeout', (string) max(1, (int) ceil($this->connectTimeout)));
+        try {
+            $result = @file_get_contents($url, false, $context);
+        } finally {
+            if ($previous !== false) {
+                ini_set('default_socket_timeout', $previous);
+            }
+        }
         $responseHeaders = function_exists('http_get_last_response_headers')
             ? (http_get_last_response_headers() ?? [])
             : ($http_response_header ?? []);

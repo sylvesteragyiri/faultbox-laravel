@@ -142,6 +142,26 @@ final class EventFactory
         return $payload;
     }
 
+    /** @internal The environment telemetry batches are reported under. */
+    public function batchEnvironment(): string
+    {
+        return $this->environment();
+    }
+
+    /** @internal The release telemetry batches are reported under, or "". */
+    public function batchRelease(): string
+    {
+        return (string) ($this->config['release'] ?? '');
+    }
+
+    /** @internal The current request's correlation ID, or null outside a request. */
+    public function currentCorrelationId(): ?string
+    {
+        $request = $this->currentRequest();
+
+        return $request !== null ? $this->correlationId($request) : null;
+    }
+
     private function environment(): string
     {
         $env = $this->config['environment'] ?: $this->app->make('config')->get('app.env', 'production');

@@ -48,6 +48,18 @@ final class FakeTransport implements Transport
         return $this->sent('/api/v1/queue-failures');
     }
 
+    /** @return list<array> notification batches */
+    public function notificationBatches(): array
+    {
+        return $this->sent('/api/v1/notifications');
+    }
+
+    /** @return list<array> every notification item, across batches */
+    public function notifications(): array
+    {
+        return array_merge([], ...array_map(static fn (array $b) => $b['notifications'] ?? [], $this->notificationBatches()));
+    }
+
     public function assertSent(?callable $filter = null, ?int $times = null): void
     {
         $matching = array_filter($this->sent(), $filter ?? static fn () => true);

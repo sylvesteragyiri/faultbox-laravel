@@ -103,6 +103,23 @@ class ServerContractTest extends TestCase
         $this->artisan('faultbox:test')->assertSuccessful();
     }
 
+    public function test_notifications_batch_is_accepted_once(): void
+    {
+        require_once __DIR__ . '/../Fixtures/Notifications.php';
+        $this->app['config']->set('mail.default', 'array');
+        \Illuminate\Support\Facades\Notification::route('mail', 'customer@example.com')
+            ->notifyNow(new \Faultbox\Laravel\Tests\Fixtures\InvoicePaid());
+        $batches = $this->client()->notifications()->drain();
+        $this->assertCount(1, $batches);
+
+        $first = $this->client()->sendNow(Client::NOTIFICATIONS_PATH, $batches[0]);
+        $this->assertSame(202, $first->status, "notifications: {$first->status} {$first->body}");
+        $this->assertStringContainsString('"status":"accepted"', $first->body);
+        // A retry of the same batch is acknowledged, not counted again.
+        $again = $this->client()->sendNow(Client::NOTIFICATIONS_PATH, $batches[0]);
+        $this->assertStringContainsString('"status":"duplicate"', $again->body);
+    }
+
     public function test_wrong_key_is_rejected_without_throwing(): void
     {
         $this->app['config']->set('faultbox.api_key', 'fbx_' . str_repeat('A', 43));

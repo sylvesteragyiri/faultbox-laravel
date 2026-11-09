@@ -40,8 +40,35 @@ return [
 
     'timeout' => (float) env('FAULTBOX_TIMEOUT', 2.0),          // seconds, whole request
     'connect_timeout' => (float) env('FAULTBOX_CONNECT_TIMEOUT', 1.0),
-    'retries' => (int) env('FAULTBOX_RETRIES', 1),               // on 429, 503 or network errors
+    'retries' => (int) env('FAULTBOX_RETRIES', 1),               // on 429, 503 or fast network errors
     'max_events_per_request' => 50,
+
+    // The most time (seconds) one request, job or command may spend sending
+    // its buffered events. Whatever is left when it runs out is dropped.
+    'flush_budget' => (float) env('FAULTBOX_FLUSH_BUDGET', 3.0),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Circuit breaker
+    |--------------------------------------------------------------------------
+    |
+    | When Faultbox doesn't answer (network failure, timeout or 5xx), sending
+    | stops for the cooldown, so an outage costs your app at most one timeout
+    | per cooldown instead of one per event. Events during the pause are
+    | dropped. A rate limit (429) pauses only for the time Faultbox asks.
+    |
+    | The store shares the pause between processes:
+    |   auto   - APCu if enabled (shared by a PHP-FPM pool), otherwise a file
+    |   apcu   - APCu only (falls back to per-process memory if disabled)
+    |   file   - a small file in the system temp directory
+    |   memory - this process only (fine for Octane and queue workers)
+    |
+    */
+
+    'circuit_breaker' => [
+        'cooldown' => (float) env('FAULTBOX_BREAKER_COOLDOWN', 60), // seconds; 0 turns it off
+        'store' => env('FAULTBOX_BREAKER_STORE', 'auto'),
+    ],
 
     /*
     |--------------------------------------------------------------------------
@@ -61,6 +88,22 @@ return [
         // default those are skipped so a failing job shows up once, as a
         // queue failure, not again as an ordinary exception on every attempt.
         'report_job_exceptions' => env('FAULTBOX_QUEUE_REPORT_JOB_EXCEPTIONS', false),
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
+    | Laravel notifications
+    |--------------------------------------------------------------------------
+    |
+    | Every notification on every channel (mail, database, Slack, SMS...),
+    | sent or failed, shown under App notifications in Faultbox. They are
+    | batched and sent with the other events after the response. Only class
+    | names are sent: never recipients, addresses or message content.
+    |
+    */
+
+    'notifications' => [
+        'enabled' => env('FAULTBOX_NOTIFICATIONS_ENABLED', true),
     ],
 
     /*

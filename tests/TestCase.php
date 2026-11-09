@@ -16,6 +16,9 @@ abstract class TestCase extends Orchestra
     protected array $faultboxConfig = [
         'faultbox.dsn' => 'http://faultbox.test',
         'faultbox.api_key' => 'fbx_testkeytestkeytestkeytestkeytestkeytestk',
+        // Keep breaker state per test: the default "auto" store would share
+        // it between tests through a file in the temp directory.
+        'faultbox.circuit_breaker.store' => 'memory',
     ];
 
     protected function getPackageProviders($app): array

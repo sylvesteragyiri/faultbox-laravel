@@ -2,6 +2,7 @@
 
 namespace Faultbox\Laravel;
 
+use Faultbox\Laravel\Support\CircuitBreaker;
 use Faultbox\Laravel\Transport\FakeTransport;
 use Faultbox\Laravel\Transport\Response;
 use Faultbox\Laravel\Transport\Transport;
@@ -18,6 +19,8 @@ class Client
     public const EVENTS_PATH = '/api/v1/events';
 
     public const QUEUE_PATH = '/api/v1/queue-failures';
+
+    public const NOTIFICATIONS_PATH = '/api/v1/notifications';
 
     /** @var list<array{path: string, payload: array}> */
     private array $buffer = [];
@@ -41,13 +44,35 @@ class Client
      */
     private ?array $bootState = null;
 
+    /**
+     * A failed delivery that took at least this long (seconds) was a timeout
+     * or an unreachable host, so retrying would only cost the same again.
+     */
+    private const SLOW_FAILURE = 0.5;
+
+    private CircuitBreaker $breaker;
+
+    /** @var \Closure(): float */
+    private \Closure $clock;
+
+    private int $droppedByBudget = 0;
+
+    /** Records Laravel notifications; null when notification monitoring is off. */
+    private ?NotificationMonitor $notifications = null;
+
     public function __construct(
         private readonly Application $app,
         private readonly EventFactory $events,
         private Transport $transport,
         private bool $enabled,
         private readonly array $config,
+        ?CircuitBreaker $breaker = null,
     ) {
+        $this->breaker = $breaker ?? new CircuitBreaker((float) ($config['circuit_breaker']['cooldown'] ?? 60));
+        $this->clock = static fn (): float => microtime(true);
+        if ($enabled && ($config['notifications']['enabled'] ?? true)) {
+            $this->notifications = new NotificationMonitor($events);
+        }
         $this->reported = new \WeakMap();
         $this->jobExceptions = new \WeakMap();
         // In a web request, send after the response; elsewhere, send at once.
@@ -101,6 +126,7 @@ class Client
      */
     public function reportFromHandler(\Throwable $e): void
     {
+        $this->guard(fn () => $this->notifications?->noteException($e));
         if (isset($this->jobExceptions[$e]) && empty($this->config['queue']['report_job_exceptions'])) {
             return; // already reported as a queue failure (or a retried attempt)
         }
@@ -126,17 +152,63 @@ class Client
 
     /**
      * Send buffered events now. Runs automatically after each request, after
-     * each queue job, and at shutdown.
+     * each queue job, and at shutdown. Never spends more than the flush
+     * budget: whatever is left when it runs out is dropped.
      */
     public function flush(): void
     {
         $this->guard(function () {
+            // Laravel notifications go out in the same flush, as batches.
+            foreach ($this->notifications?->drain() ?? [] as $batch) {
+                $this->buffer[] = ['path' => self::NOTIFICATIONS_PATH, 'payload' => $batch];
+            }
             $buffer = $this->buffer;
             $this->buffer = [];
-            foreach ($buffer as $item) {
+            $budget = (float) ($this->config['flush_budget'] ?? 3.0);
+            $deadline = ($this->clock)() + $budget;
+            foreach ($buffer as $i => $item) {
+                if ($budget > 0 && ($this->clock)() >= $deadline) {
+                    $this->droppedByBudget += count($buffer) - $i;
+                    break;
+                }
                 $this->deliver($item['path'], $item['payload']);
             }
         });
+    }
+
+    /**
+     * Delivery health in this process: whether the circuit breaker is open,
+     * until when, and how many events were dropped to protect the app.
+     *
+     * @return array{breaker_open: bool, paused_until: ?float, dropped_by_breaker: int, dropped_by_budget: int, dropped_notifications: int}
+     */
+    public function stats(): array
+    {
+        return [
+            'breaker_open' => $this->breaker->isOpen(),
+            'paused_until' => $this->breaker->openUntil(),
+            'dropped_by_breaker' => $this->breaker->dropped(),
+            'dropped_by_budget' => $this->droppedByBudget,
+            'dropped_notifications' => $this->notifications?->dropped() ?? 0,
+        ];
+    }
+
+    /** @internal The notification monitor, or null when notification monitoring is off. */
+    public function notifications(): ?NotificationMonitor
+    {
+        return $this->notifications;
+    }
+
+    /** @internal Replaces the circuit breaker (tests, and the service provider). */
+    public function setBreaker(CircuitBreaker $breaker): void
+    {
+        $this->breaker = $breaker;
+    }
+
+    /** @internal Replaces the clock used for budgets and slow-failure detection (tests). */
+    public function setClock(\Closure $clock): void
+    {
+        $this->clock = $clock;
     }
 
     /**
@@ -153,6 +225,12 @@ class Client
         $this->enabled = true;
         $this->deferred = false;
         $this->buffer = [];
+        if (($this->config['notifications']['enabled'] ?? true)) {
+            $this->notifications = new NotificationMonitor($this->events);
+        }
+        // A fresh, process-local breaker: a fake must not be paused by an
+        // outage recorded in a shared store, or leave one behind.
+        $this->breaker = new CircuitBreaker((float) ($this->config['circuit_breaker']['cooldown'] ?? 60));
 
         return $fake;
     }
@@ -180,6 +258,7 @@ class Client
                 $this->bootState = [$context, $user, null];
             }
             $this->buffer = [];
+            $this->notifications?->reset();
             $this->events->restore($this->bootState);
             $this->events->useScope($sandbox, $request);
             $this->deferred = true;
@@ -203,10 +282,14 @@ class Client
         return $this->lastResponse;
     }
 
-    /** Send a payload synchronously and return the server's answer. */
+    /**
+     * Send a payload synchronously and return the server's answer. Bypasses a
+     * paused circuit breaker (faultbox:test uses it to check the setup), and
+     * a success resumes sending.
+     */
     public function sendNow(string $path, array $payload): Response
     {
-        $this->deliver($path, $payload);
+        $this->deliver($path, $payload, force: true);
 
         return $this->lastResponse ?? new Response(0, error: 'not sent');
     }
@@ -222,6 +305,7 @@ class Client
     /** @internal Marks an exception the worker will pass to the handler again. */
     public function markJobException(\Throwable $e): void
     {
+        $this->notifications?->noteException($e);
         $this->jobExceptions[$e] = true;
     }
 
@@ -258,23 +342,50 @@ class Client
         }
     }
 
-    private function deliver(string $path, array $payload): void
+    private function deliver(string $path, array $payload, bool $force = false): void
     {
         if ($this->sending) {
             return; // never report problems that happen while reporting
+        }
+        // Faultbox failed recently: don't spend another timeout finding out
+        // it still does. The event is dropped and counted.
+        if (! $force && ! $this->breaker->allows()) {
+            $this->lastResponse = new Response(0, error: 'not sent: Faultbox failed recently, so sending is paused (circuit breaker)');
+
+            return;
         }
         $this->sending = true;
         try {
             $retries = max(0, (int) ($this->config['retries'] ?? 1));
             for ($attempt = 0; ; $attempt++) {
+                $started = ($this->clock)();
                 $response = $this->transport->send($path, $payload);
+                $elapsed = ($this->clock)() - $started;
                 $this->lastResponse = $response;
-                if ($response->accepted() || ! $response->retryable() || $attempt >= $retries) {
+                if ($response->accepted()) {
+                    $this->breaker->success();
+
+                    return;
+                }
+                if (! $response->retryable() || $attempt >= $retries) {
+                    break;
+                }
+                // A slow network failure is a timeout or an unreachable host.
+                // Retrying would hold the worker for the same time again.
+                if ($response->status === 0 && $elapsed >= self::SLOW_FAILURE) {
                     break;
                 }
                 // Honour Retry-After, but never hold a worker for more than a second.
                 usleep((int) (min(max($response->retryAfter ?? 0, 0.2), 1.0) * 1_000_000));
             }
+            match (true) {
+                // Rate limited: Faultbox is up, so pause only as long as it asks.
+                $response->status === 429 => $this->breaker->failure(max(1.0, (float) ($response->retryAfter ?? 5))),
+                // Unreachable, timing out or failing: pause for the cooldown.
+                $response->status === 0 || $response->status >= 500 => $this->breaker->failure(),
+                // It answered (401, 403, 422...): it's up; keep sending.
+                default => $this->breaker->success(),
+            };
         } finally {
             $this->sending = false;
         }

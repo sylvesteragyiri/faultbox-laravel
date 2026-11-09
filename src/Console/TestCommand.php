@@ -41,6 +41,14 @@ class TestCommand extends Command
             $payload = $client->events()->exception($e, ['source' => 'faultbox:test']);
         }
 
+        $paused = $client->stats()['paused_until'];
+        if ($paused !== null) {
+            $this->components->warn(sprintf(
+                'Sending was paused until %s because Faultbox failed recently (circuit breaker). Testing anyway.',
+                date('H:i:s', (int) $paused),
+            ));
+        }
+
         $response = $client->sendNow(Client::EVENTS_PATH, $payload);
 
         if ($response->accepted()) {

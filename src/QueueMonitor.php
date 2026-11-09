@@ -61,6 +61,9 @@ final class QueueMonitor
             $this->client->events()->restore($this->savedContext);
             $this->savedContext = null;
         }
+        // Send what the job produced (failures, notifications) now, not
+        // when the next job happens to succeed.
+        $this->client->flush();
     }
 
     public function failed(JobFailed $event): void
