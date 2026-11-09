@@ -106,11 +106,22 @@ $this->assertCount(1, $fake->queueFailures());
 // $fake->assertNothingSent();
 ```
 
+## Laravel Octane
+
+Octane is supported with no configuration. One Octane worker serves many requests with the same objects, so the package listens to Octane's `RequestReceived` and `RequestTerminated` events:
+
+- **Fresh state per request:** context, user and correlation ID are reset at the start of every request, so nothing from one request reaches another's events. Context set at boot, for example in a service provider, is kept.
+- **The right request and user:** both are read from the current request's sandbox, not from the worker's base container.
+- **Sent after the response:** events are buffered during the request and delivered on `RequestTerminated`.
+
+After installing or upgrading, reload the workers with `php artisan octane:reload`.
+
 ## How events are sent
 
 | Where the code runs | When events are sent |
 |---|---|
 | Web request | Buffered, then sent after the response (`terminating`). |
+| Octane request | Buffered, then sent on Octane's `RequestTerminated`. |
 | Console command or queue worker | Sent immediately, and flushed after each job. |
 | Fatal error | Flushed by a shutdown handler. |
 

@@ -27,6 +27,15 @@ final class EventFactory
 
     private ?string $correlationId = null;
 
+    /**
+     * Under Octane, the sandbox container and request of the request being
+     * handled. The constructor's container is the worker's base app, which
+     * outlives requests, so request and auth lookups must use these instead.
+     */
+    private ?Container $scope = null;
+
+    private ?Request $scopeRequest = null;
+
     public function __construct(
         private readonly Container $app,
         private readonly Sanitizer $sanitizer,
@@ -49,6 +58,13 @@ final class EventFactory
     public function setUser(?array $user): void
     {
         $this->user = $user;
+    }
+
+    /** @internal Octane: point request and auth lookups at the current request's sandbox (null to clear). */
+    public function useScope(?Container $sandbox, ?Request $request): void
+    {
+        $this->scope = $sandbox;
+        $this->scopeRequest = $request;
     }
 
     /** @return array{0: array, 1: ?array, 2: ?string} */
@@ -249,6 +265,9 @@ final class EventFactory
 
     private function currentRequest(): ?Request
     {
+        if ($this->scopeRequest !== null) {
+            return $this->scopeRequest->getHost() !== '' ? $this->scopeRequest : null;
+        }
         if ($this->app->runningInConsole() && ! $this->app->runningUnitTests()) {
             return null;
         }
@@ -303,12 +322,13 @@ final class EventFactory
         if ($this->user !== null) {
             return $this->limitObject($this->sanitizer->clean($this->user));
         }
-        if (empty($this->config['send_user_id']) || ! $this->app->bound('auth')) {
+        $container = $this->scope ?? $this->app;
+        if (empty($this->config['send_user_id']) || ! $container->bound('auth')) {
             return null;
         }
 
         try {
-            $id = $this->app->make('auth')->id();
+            $id = $container->make('auth')->id();
         } catch (\Throwable) {
             return null; // no session store or guard available here
         }

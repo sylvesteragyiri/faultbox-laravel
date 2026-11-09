@@ -5,7 +5,9 @@ namespace Faultbox\Laravel;
 use Faultbox\Laravel\Transport\FakeTransport;
 use Faultbox\Laravel\Transport\Response;
 use Faultbox\Laravel\Transport\Transport;
+use Illuminate\Contracts\Container\Container;
 use Illuminate\Contracts\Foundation\Application;
+use Illuminate\Http\Request;
 
 /**
  * The Faultbox client. Everything public here is safe to call anywhere: it
@@ -31,6 +33,13 @@ class Client
     private bool $sending = false;
 
     private ?Response $lastResponse = null;
+
+    /**
+     * Octane: the context, user and correlation ID as they were before the
+     * first request, restored at the start and end of every request so
+     * nothing leaks from one request to the next in a long-lived worker.
+     */
+    private ?array $bootState = null;
 
     public function __construct(
         private readonly Application $app,
@@ -156,6 +165,37 @@ class Client
     public function setDeferred(bool $deferred): void
     {
         $this->deferred = $deferred;
+    }
+
+    /**
+     * @internal Octane: a request starts in a long-lived worker. Resets the
+     * per-request state, scopes lookups to the request's sandbox, and
+     * buffers events until the response has been sent.
+     */
+    public function beginOctaneRequest(?Container $sandbox, ?Request $request): void
+    {
+        $this->guard(function () use ($sandbox, $request) {
+            if ($this->bootState === null) {
+                [$context, $user] = $this->events->snapshot();
+                $this->bootState = [$context, $user, null];
+            }
+            $this->buffer = [];
+            $this->events->restore($this->bootState);
+            $this->events->useScope($sandbox, $request);
+            $this->deferred = true;
+        });
+    }
+
+    /** @internal Octane: the response has been sent. Delivers the buffer and resets state. */
+    public function endOctaneRequest(): void
+    {
+        $this->guard(function () {
+            $this->flush();
+            if ($this->bootState !== null) {
+                $this->events->restore($this->bootState);
+            }
+            $this->events->useScope(null, null);
+        });
     }
 
     public function lastResponse(): ?Response

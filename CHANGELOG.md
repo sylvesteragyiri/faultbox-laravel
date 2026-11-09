@@ -16,5 +16,6 @@ First release, for Faultbox server API v1.
   - Gzip compression, short timeouts, and one retry on `429`/`503`.
   - Never throws.
 - **Privacy:** an allowlist of request headers, the user ID only, and redaction of sensitive keys in context, URLs and job metadata.
+- **Laravel Octane support:** per-request state (context, user, correlation ID) is reset when each request starts, the request and user are read from that request's sandbox, and events are sent after the response. Context set in service providers is kept. No dependency on `laravel/octane`.
 - **`php artisan faultbox:test`** to check the setup.
 - **`Faultbox::fake()`** for application tests.

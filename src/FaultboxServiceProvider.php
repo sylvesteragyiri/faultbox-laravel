@@ -9,6 +9,7 @@ use Faultbox\Laravel\Transport\Response;
 use Faultbox\Laravel\Transport\Transport;
 use Illuminate\Contracts\Debug\ExceptionHandler;
 use Illuminate\Contracts\Events\Dispatcher;
+use Illuminate\Http\Request;
 use Illuminate\Queue\Events\JobExceptionOccurred;
 use Illuminate\Queue\Events\JobFailed;
 use Illuminate\Queue\Events\JobProcessed;
@@ -57,6 +58,7 @@ class FaultboxServiceProvider extends ServiceProvider
 
         $this->registerExceptionReporting();
         $this->registerQueueMonitoring();
+        $this->registerOctane();
 
         // Web requests buffer events; send them once the response is out.
         $this->app->terminating(fn () => $this->app->make(Client::class)->flush());
@@ -68,6 +70,35 @@ class FaultboxServiceProvider extends ServiceProvider
             }
         });
     }
+
+    /**
+     * Laravel Octane keeps the app in memory and serves many requests per
+     * worker. Reset per-request state when each request starts and deliver
+     * buffered events once its response has been sent. The events are
+     * matched by name, so the package doesn't depend on Octane.
+     */
+    private function registerOctane(): void
+    {
+        if (class_exists(self::OCTANE_REQUEST_RECEIVED)) {
+            // Resolve now, in the worker's base app, so every request's
+            // sandbox shares this one instance instead of building its own.
+            $this->app->make(Client::class);
+        }
+        $events = $this->app->make(Dispatcher::class);
+        $events->listen(self::OCTANE_REQUEST_RECEIVED, function ($event) {
+            $this->app->make(Client::class)->beginOctaneRequest(
+                $event->sandbox ?? null,
+                ($event->request ?? null) instanceof Request ? $event->request : null,
+            );
+        });
+        $events->listen(self::OCTANE_REQUEST_TERMINATED, function () {
+            $this->app->make(Client::class)->endOctaneRequest();
+        });
+    }
+
+    private const OCTANE_REQUEST_RECEIVED = 'Laravel\Octane\Events\RequestReceived';
+
+    private const OCTANE_REQUEST_TERMINATED = 'Laravel\Octane\Events\RequestTerminated';
 
     /**
      * Hooks into the app's exception handler, so everything Laravel reports
