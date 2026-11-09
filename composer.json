@@ -42,5 +42,10 @@
         "sort-packages": true
     },
     "minimum-stability": "stable",
-    "prefer-stable": true
+    "prefer-stable": true,
+    "repositories": [{
+        "name": "faultbox",
+        "type": "vcs",
+        "url": "https://github.com/sylvesteragyiri/faultbox-laravel"
+    }]
 }
