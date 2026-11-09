@@ -48,16 +48,39 @@ final class FakeTransport implements Transport
         return $this->sent('/api/v1/queue-failures');
     }
 
-    /** @return list<array> notification batches */
+    /** @return list<array> telemetry batches (notifications, mails, commands) */
+    public function telemetryBatches(): array
+    {
+        return $this->sent('/api/v1/telemetry');
+    }
+
+    /** @return list<array> telemetry batches that contain notifications */
     public function notificationBatches(): array
     {
-        return $this->sent('/api/v1/notifications');
+        return array_values(array_filter($this->telemetryBatches(), static fn (array $b) => ! empty($b['notifications'])));
     }
 
     /** @return list<array> every notification item, across batches */
     public function notifications(): array
     {
-        return array_merge([], ...array_map(static fn (array $b) => $b['notifications'] ?? [], $this->notificationBatches()));
+        return $this->telemetryItems('notifications');
+    }
+
+    /** @return list<array> every mail item, across batches */
+    public function mails(): array
+    {
+        return $this->telemetryItems('mails');
+    }
+
+    /** @return list<array> every command run, across batches */
+    public function commands(): array
+    {
+        return $this->telemetryItems('commands');
+    }
+
+    private function telemetryItems(string $list): array
+    {
+        return array_merge([], ...array_map(static fn (array $b) => $b[$list] ?? [], $this->telemetryBatches()));
     }
 
     public function assertSent(?callable $filter = null, ?int $times = null): void

@@ -20,7 +20,13 @@ class Client
 
     public const QUEUE_PATH = '/api/v1/queue-failures';
 
+    public const TELEMETRY_PATH = '/api/v1/telemetry';
+
+    /** @deprecated The first telemetry endpoint; TELEMETRY_PATH accepts the same body. */
     public const NOTIFICATIONS_PATH = '/api/v1/notifications';
+
+    /** The server's limit per list in one telemetry batch. */
+    private const MAX_PER_LIST = 500;
 
     /** @var list<array{path: string, payload: array}> */
     private array $buffer = [];
@@ -60,6 +66,12 @@ class Client
     /** Records Laravel notifications; null when notification monitoring is off. */
     private ?NotificationMonitor $notifications = null;
 
+    /** Records mail sent directly; null when mail monitoring is off. */
+    private ?MailMonitor $mails = null;
+
+    /** Records artisan commands; null when command monitoring is off. */
+    private ?CommandMonitor $commands = null;
+
     public function __construct(
         private readonly Application $app,
         private readonly EventFactory $events,
@@ -70,8 +82,8 @@ class Client
     ) {
         $this->breaker = $breaker ?? new CircuitBreaker((float) ($config['circuit_breaker']['cooldown'] ?? 60));
         $this->clock = static fn (): float => microtime(true);
-        if ($enabled && ($config['notifications']['enabled'] ?? true)) {
-            $this->notifications = new NotificationMonitor($events);
+        if ($enabled) {
+            $this->startMonitors();
         }
         $this->reported = new \WeakMap();
         $this->jobExceptions = new \WeakMap();
@@ -126,7 +138,7 @@ class Client
      */
     public function reportFromHandler(\Throwable $e): void
     {
-        $this->guard(fn () => $this->notifications?->noteException($e));
+        $this->guard(fn () => $this->noteException($e));
         if (isset($this->jobExceptions[$e]) && empty($this->config['queue']['report_job_exceptions'])) {
             return; // already reported as a queue failure (or a retried attempt)
         }
@@ -158,9 +170,10 @@ class Client
     public function flush(): void
     {
         $this->guard(function () {
-            // Laravel notifications go out in the same flush, as batches.
-            foreach ($this->notifications?->drain() ?? [] as $batch) {
-                $this->buffer[] = ['path' => self::NOTIFICATIONS_PATH, 'payload' => $batch];
+            // Notifications, mail and commands go out in the same flush, as
+            // telemetry batches.
+            foreach ($this->telemetryBatches() as $batch) {
+                $this->buffer[] = ['path' => self::TELEMETRY_PATH, 'payload' => $batch];
             }
             $buffer = $this->buffer;
             $this->buffer = [];
@@ -180,7 +193,7 @@ class Client
      * Delivery health in this process: whether the circuit breaker is open,
      * until when, and how many events were dropped to protect the app.
      *
-     * @return array{breaker_open: bool, paused_until: ?float, dropped_by_breaker: int, dropped_by_budget: int, dropped_notifications: int}
+     * @return array{breaker_open: bool, paused_until: ?float, dropped_by_breaker: int, dropped_by_budget: int, dropped_notifications: int, dropped_mails: int, dropped_commands: int}
      */
     public function stats(): array
     {
@@ -190,13 +203,81 @@ class Client
             'dropped_by_breaker' => $this->breaker->dropped(),
             'dropped_by_budget' => $this->droppedByBudget,
             'dropped_notifications' => $this->notifications?->dropped() ?? 0,
+            'dropped_mails' => $this->mails?->dropped() ?? 0,
+            'dropped_commands' => $this->commands?->dropped() ?? 0,
         ];
+    }
+
+    /** An exception was reported: the monitors attribute it to whatever it broke. */
+    private function noteException(\Throwable $e): void
+    {
+        $this->notifications?->noteException($e);
+        $this->mails?->noteException($e);
+        $this->commands?->noteException($e);
     }
 
     /** @internal The notification monitor, or null when notification monitoring is off. */
     public function notifications(): ?NotificationMonitor
     {
         return $this->notifications;
+    }
+
+    /** @internal The mail monitor, or null when mail monitoring is off. */
+    public function mails(): ?MailMonitor
+    {
+        return $this->mails;
+    }
+
+    /** @internal The command monitor, or null when command monitoring is off. */
+    public function commands(): ?CommandMonitor
+    {
+        return $this->commands;
+    }
+
+    /**
+     * @internal Settles the monitors and returns the telemetry batches to
+     * send: usually one, more only when a list passes the server's limit.
+     *
+     * @return list<array>
+     */
+    public function telemetryBatches(): array
+    {
+        $lists = [
+            'notifications' => array_chunk($this->notifications?->drainItems() ?? [], self::MAX_PER_LIST),
+            'mails' => array_chunk($this->mails?->drainItems() ?? [], self::MAX_PER_LIST),
+            'commands' => array_chunk($this->commands?->drainItems() ?? [], self::MAX_PER_LIST),
+        ];
+        $count = max(array_map('count', $lists));
+        if ($count === 0) {
+            return [];
+        }
+        $environment = $this->events->batchEnvironment();
+        $release = $this->events->batchRelease();
+        $batches = [];
+        for ($i = 0; $i < $count; $i++) {
+            $batch = ['batch_id' => Support\Uuid::v7(), 'environment' => $environment];
+            if ($release !== '') {
+                $batch['release'] = $release;
+            }
+            foreach ($lists as $name => $chunks) {
+                if (isset($chunks[$i])) {
+                    $batch[$name] = $chunks[$i];
+                }
+            }
+            $batches[] = $batch;
+        }
+
+        return $batches;
+    }
+
+    private function startMonitors(): void
+    {
+        $config = $this->config;
+        $this->notifications = ($config['notifications']['enabled'] ?? true) ? new NotificationMonitor($this->events) : null;
+        $this->mails = ($config['mail']['enabled'] ?? true) ? new MailMonitor($this->events) : null;
+        $this->commands = ($config['commands']['enabled'] ?? true)
+            ? new CommandMonitor((array) ($config['commands']['ignore'] ?? CommandMonitor::DEFAULT_IGNORE))
+            : null;
     }
 
     /** @internal Replaces the circuit breaker (tests, and the service provider). */
@@ -225,9 +306,7 @@ class Client
         $this->enabled = true;
         $this->deferred = false;
         $this->buffer = [];
-        if (($this->config['notifications']['enabled'] ?? true)) {
-            $this->notifications = new NotificationMonitor($this->events);
-        }
+        $this->startMonitors();
         // A fresh, process-local breaker: a fake must not be paused by an
         // outage recorded in a shared store, or leave one behind.
         $this->breaker = new CircuitBreaker((float) ($this->config['circuit_breaker']['cooldown'] ?? 60));
@@ -259,6 +338,7 @@ class Client
             }
             $this->buffer = [];
             $this->notifications?->reset();
+            $this->mails?->reset();
             $this->events->restore($this->bootState);
             $this->events->useScope($sandbox, $request);
             $this->deferred = true;
@@ -305,7 +385,7 @@ class Client
     /** @internal Marks an exception the worker will pass to the handler again. */
     public function markJobException(\Throwable $e): void
     {
-        $this->notifications?->noteException($e);
+        $this->noteException($e);
         $this->jobExceptions[$e] = true;
     }
 

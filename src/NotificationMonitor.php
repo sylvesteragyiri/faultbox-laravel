@@ -6,8 +6,8 @@ use Faultbox\Laravel\Support\Uuid;
 
 /**
  * Records the Laravel notifications the app sends, one item per notification
- * per channel, and hands them to the client in batches when it flushes
- * (after the response, after each queue job, at shutdown).
+ * per channel, and hands them to the client when it flushes (after the
+ * response, after each queue job, at shutdown).
  *
  * Only class names are sent: the notification, the channel and the
  * notifiable's type. Never the notifiable's attributes, the recipient's
@@ -20,9 +20,6 @@ use Faultbox\Laravel\Support\Uuid;
  */
 final class NotificationMonitor
 {
-    /** The server's limit (POST /api/v1/notifications). */
-    private const MAX_PER_BATCH = 500;
-
     /** Items kept per flush at most, so a runaway loop can't use unbounded memory. */
     private const MAX_PER_FLUSH = 2_000;
 
@@ -96,11 +93,12 @@ final class NotificationMonitor
     }
 
     /**
-     * Settles unconfirmed sends and returns the batches to send.
+     * Settles unconfirmed sends and returns the items, ready for a
+     * telemetry batch.
      *
-     * @return list<array> payloads for POST /api/v1/notifications
+     * @return list<array>
      */
-    public function drain(): array
+    public function drainItems(): array
     {
         foreach ($this->pending as $p) {
             if ($this->lastError !== null && $this->lastError['seq'] >= $p['seq']) {
@@ -110,26 +108,10 @@ final class NotificationMonitor
                 $this->keep($item);
             }
         }
-        $this->pending = [];
-        $this->failedKeys = [];
-        $this->lastError = null;
-        if ($this->items === []) {
-            return [];
-        }
+        $items = $this->items;
+        $this->reset();
 
-        $environment = $this->events->batchEnvironment();
-        $release = $this->events->batchRelease();
-        $batches = [];
-        foreach (array_chunk($this->items, self::MAX_PER_BATCH) as $chunk) {
-            $batch = ['batch_id' => Uuid::v7(), 'environment' => $environment, 'notifications' => $chunk];
-            if ($release !== '') {
-                $batch['release'] = $release;
-            }
-            $batches[] = $batch;
-        }
-        $this->items = [];
-
-        return $batches;
+        return $items;
     }
 
     /** Forget everything without sending (Octane request start, fakes). */

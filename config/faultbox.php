@@ -108,6 +108,34 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Mail and artisan commands
+    |--------------------------------------------------------------------------
+    |
+    | Mail sent directly (Mailables, Mail::raw) is shown under Mail; mail sent
+    | by notifications stays under App notifications. Only the Mailable's
+    | class, the mailer and the number of recipients are sent.
+    |
+    | Every artisan command run, scheduled ones included, is shown under
+    | Commands with its exit code and duration (never its arguments). The
+    | long-running and noisy commands below are ignored; * is a wildcard.
+    |
+    */
+
+    'mail' => [
+        'enabled' => env('FAULTBOX_MAIL_ENABLED', true),
+    ],
+
+    'commands' => [
+        'enabled' => env('FAULTBOX_COMMANDS_ENABLED', true),
+        'ignore' => [
+            'schedule:run', 'schedule:work', 'schedule:finish', 'schedule:interrupt',
+            'queue:work', 'queue:listen', 'horizon', 'horizon:*', 'octane:*', 'reverb:*', 'pulse:*',
+            'serve', 'tinker', 'list', 'help', 'completion', 'about', 'package:discover', 'faultbox:*',
+        ],
+    ],
+
+    /*
+    |--------------------------------------------------------------------------
     | Context and privacy
     |--------------------------------------------------------------------------
     */

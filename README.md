@@ -47,6 +47,24 @@ Every notification your app sends is reported automatically, per channel: mail, 
 
 Turn it off with `FAULTBOX_NOTIFICATIONS_ENABLED=false`.
 
+## Mail
+
+Mail your app sends directly, with Mailables (`Mail::to()->send()`, `queue()`) or `Mail::raw`, is shown under **Mail**: sent and failed counts per Mailable and mailer, and recent failures with their reasons.
+
+- **No double counting:** mail sent by a notification's mail channel is left out here; it's counted under App notifications.
+- **Failures:** a transport that throws (SMTP answering 550, an API mailer timing out) counts as failed, with the exception as the reason. A send stopped by a `MessageSending` listener isn't counted.
+- **Private:** only the Mailable's class, the mailer's name and the number of recipients are sent. Never addresses, subjects or content.
+
+Turn it off with `FAULTBOX_MAIL_ENABLED=false`.
+
+## Artisan commands
+
+Every artisan command run is shown under **Commands**: its exit code, how long it took and, when it threw, the exception. Each command the scheduler starts is a run of its own, so failing scheduled tasks show up here. Only the command's name is sent, never its arguments or options.
+
+Long-running and noisy commands are ignored: `queue:work`, `queue:listen`, `schedule:run`, `schedule:work`, `horizon`, `octane:*`, `reverb:*`, `pulse:*`, `serve`, `tinker`, `list` and a few more. Change the list in `config/faultbox.php` (`commands.ignore`; `*` is a wildcard). A command called with `$this->call()` inside another is part of the outer run: Laravel fires no events for it.
+
+Turn it off with `FAULTBOX_COMMANDS_ENABLED=false`.
+
 ## Manual reporting and context
 
 ```php
@@ -99,6 +117,8 @@ php artisan vendor:publish --tag=faultbox-config
 | `FAULTBOX_SEND_USER_ID` | `true` | Sends `auth()->id()` only. |
 | `FAULTBOX_QUEUE_ENABLED` | `true` | |
 | `FAULTBOX_NOTIFICATIONS_ENABLED` | `true` | Report Laravel notifications. |
+| `FAULTBOX_MAIL_ENABLED` | `true` | Report mail sent directly (Mailables, `Mail::raw`). |
+| `FAULTBOX_COMMANDS_ENABLED` | `true` | Report artisan command runs. Ignored commands: `commands.ignore` in the config file. |
 | `FAULTBOX_QUEUE_REPORT_ATTEMPTS` | `false` | |
 | `FAULTBOX_QUEUE_REPORT_JOB_EXCEPTIONS` | `false` | |
 

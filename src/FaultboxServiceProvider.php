@@ -68,6 +68,8 @@ class FaultboxServiceProvider extends ServiceProvider
         $this->registerExceptionReporting();
         $this->registerQueueMonitoring();
         $this->registerNotificationMonitoring();
+        $this->registerMailMonitoring();
+        $this->registerCommandMonitoring();
         $this->registerOctane();
 
         // Web requests buffer events; send them once the response is out.
@@ -124,6 +126,39 @@ class FaultboxServiceProvider extends ServiceProvider
         ));
         $events->listen('Illuminate\Notifications\Events\NotificationFailed', fn ($e) => self::safely(
             fn () => $monitor()?->failed($e->notifiable, $e->notification, (string) $e->channel, is_array($e->data ?? null) ? $e->data : [])
+        ));
+    }
+
+    /**
+     * Mail sent directly (Mailables, Mail::raw). Mail sent by notifications
+     * is skipped here; NotificationMonitor counts it.
+     */
+    private function registerMailMonitoring(): void
+    {
+        if (! $this->app['config']->get('faultbox.mail.enabled', true)) {
+            return;
+        }
+        $events = $this->app->make('events');
+        $monitor = fn () => $this->app->make(Client::class)->mails();
+        $events->listen('Illuminate\Mail\Events\MessageSending', fn ($e) => self::safely(
+            fn () => $monitor()?->sending($e->message, is_array($e->data ?? null) ? $e->data : [])
+        ));
+        $events->listen('Illuminate\Mail\Events\MessageSent', fn () => self::safely(fn () => $monitor()?->sent()));
+    }
+
+    /** Artisan commands, scheduled ones included. */
+    private function registerCommandMonitoring(): void
+    {
+        if (! $this->app['config']->get('faultbox.commands.enabled', true)) {
+            return;
+        }
+        $events = $this->app->make('events');
+        $monitor = fn () => $this->app->make(Client::class)->commands();
+        $events->listen('Illuminate\Console\Events\CommandStarting', fn ($e) => self::safely(
+            fn () => $monitor()?->starting((string) $e->command)
+        ));
+        $events->listen('Illuminate\Console\Events\CommandFinished', fn ($e) => self::safely(
+            fn () => $monitor()?->finished((string) $e->command, (int) $e->exitCode)
         ));
     }
 

@@ -109,15 +109,36 @@ class ServerContractTest extends TestCase
         $this->app['config']->set('mail.default', 'array');
         \Illuminate\Support\Facades\Notification::route('mail', 'customer@example.com')
             ->notifyNow(new \Faultbox\Laravel\Tests\Fixtures\InvoicePaid());
-        $batches = $this->client()->notifications()->drain();
+        $batches = $this->client()->telemetryBatches();
         $this->assertCount(1, $batches);
 
-        $first = $this->client()->sendNow(Client::NOTIFICATIONS_PATH, $batches[0]);
+        $first = $this->client()->sendNow(Client::TELEMETRY_PATH, $batches[0]);
         $this->assertSame(202, $first->status, "notifications: {$first->status} {$first->body}");
         $this->assertStringContainsString('"status":"accepted"', $first->body);
         // A retry of the same batch is acknowledged, not counted again.
-        $again = $this->client()->sendNow(Client::NOTIFICATIONS_PATH, $batches[0]);
+        $again = $this->client()->sendNow(Client::TELEMETRY_PATH, $batches[0]);
         $this->assertStringContainsString('"status":"duplicate"', $again->body);
+    }
+
+    public function test_mail_and_commands_are_accepted(): void
+    {
+        require_once __DIR__ . '/../Fixtures/Mail.php';
+        $this->app['config']->set('mail.default', 'array');
+        $this->app['config']->set('mail.mailers.array', ['transport' => 'array']);
+        $this->app->make(\Illuminate\Contracts\Console\Kernel::class)->rerouteSymfonyCommandEvents();
+        \Illuminate\Support\Facades\Artisan::command('app:e2e-sync', fn () => 0);
+
+        \Illuminate\Support\Facades\Mail::to('customer@example.com')->send(new \Faultbox\Laravel\Tests\Fixtures\OrderShipped());
+        \Illuminate\Support\Facades\Mail::raw('Plain', fn ($m) => $m->to('ops@example.com'));
+        \Illuminate\Support\Facades\Artisan::call('app:e2e-sync');
+        $batches = $this->client()->telemetryBatches();
+        $this->assertCount(1, $batches);
+        $this->assertCount(2, $batches[0]['mails']);
+        $this->assertCount(1, $batches[0]['commands']);
+
+        $response = $this->client()->sendNow(Client::TELEMETRY_PATH, $batches[0]);
+        $this->assertSame(202, $response->status, "telemetry: {$response->status} {$response->body}");
+        $this->assertStringContainsString('"count":3', $response->body);
     }
 
     public function test_wrong_key_is_rejected_without_throwing(): void
