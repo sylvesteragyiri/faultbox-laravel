@@ -1,0 +1,46 @@
+{
+    "name": "faultbox/laravel",
+    "description": "Laravel SDK for Faultbox: lightweight, self-hosted error and queue failure monitoring.",
+    "type": "library",
+    "license": "Apache-2.0",
+    "keywords": ["laravel", "error-tracking", "exceptions", "queue", "monitoring", "faultbox"],
+    "homepage": "https://github.com/sylvesteragyiri/faultbox",
+    "authors": [{"name": "Sylvester Agyiri"}],
+    "require": {
+        "php": "^8.2",
+        "ext-json": "*",
+        "illuminate/console": "^12.0|^13.0",
+        "illuminate/contracts": "^12.0|^13.0",
+        "illuminate/queue": "^12.0|^13.0",
+        "illuminate/support": "^12.0|^13.0"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0|^11.0",
+        "phpunit/phpunit": "^11.5|^12.0"
+    },
+    "suggest": {
+        "ext-curl": "Faster event delivery; falls back to PHP streams without it.",
+        "ext-zlib": "Gzip-compresses events before sending."
+    },
+    "autoload": {
+        "psr-4": {"Faultbox\\Laravel\\": "src/"}
+    },
+    "autoload-dev": {
+        "psr-4": {"Faultbox\\Laravel\\Tests\\": "tests/"},
+        "files": ["tests/Fixtures/Jobs.php"]
+    },
+    "extra": {
+        "laravel": {
+            "providers": ["Faultbox\\Laravel\\FaultboxServiceProvider"],
+            "aliases": {"Faultbox": "Faultbox\\Laravel\\Facades\\Faultbox"}
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}

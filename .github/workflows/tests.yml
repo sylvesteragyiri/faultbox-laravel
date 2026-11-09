@@ -1,0 +1,123 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: PHP ${{ matrix.php }} · Laravel ${{ matrix.laravel }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.2", "8.3", "8.4"]
+        laravel: ["12", "13"]
+        exclude:
+          - php: "8.2" # Laravel 13 requires PHP 8.3+
+            laravel: "13"
+        include:
+          - laravel: "12"
+            testbench: "^10.0"
+            phpunit: "^11.5"
+          - laravel: "13"
+            testbench: "^11.0"
+            phpunit: "^12.0"
+    services:
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: --health-cmd "redis-cli ping" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: curl, json, mbstring, pdo_sqlite, sqlite3, zlib, redis
+          coverage: none
+
+      - name: Install Laravel ${{ matrix.laravel }}
+        run: |
+          composer require --no-interaction --no-progress --no-update \
+            "illuminate/support:^${{ matrix.laravel }}.0" "illuminate/queue:^${{ matrix.laravel }}.0" \
+            "illuminate/contracts:^${{ matrix.laravel }}.0" "illuminate/console:^${{ matrix.laravel }}.0"
+          composer require --dev --no-interaction --no-progress --no-update \
+            "orchestra/testbench:${{ matrix.testbench }}" "phpunit/phpunit:${{ matrix.phpunit }}"
+          composer update --no-interaction --no-progress --prefer-dist -W
+
+      - name: Syntax check
+        run: find src config -name '*.php' -print0 | xargs -0 -n1 php -l > /dev/null
+
+      - name: Unit and feature tests (database, sync and Redis queues)
+        run: vendor/bin/phpunit --testsuite Unit,Feature
+
+  contract:
+    name: Contract test against the Faultbox server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Check out the Faultbox server
+        uses: actions/checkout@v5
+        with:
+          repository: sylvesteragyiri/Faultbox
+          path: server
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: stable
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.4"
+          extensions: curl, json, mbstring, pdo_sqlite, sqlite3, zlib
+          coverage: none
+
+      - run: composer install --no-interaction --no-progress --prefer-dist
+
+      - name: Start Faultbox and create a project
+        id: server
+        run: |
+          set -euo pipefail
+          (cd server && CGO_ENABLED=0 go build -o ../faultbox ./cmd/faultbox)
+          FAULTBOX_PORT=8080 FAULTBOX_DATABASE_PATH=/tmp/faultbox.db \
+          FAULTBOX_SECRET="ci-$(openssl rand -hex 24)" \
+          FAULTBOX_ADMIN_EMAIL=ci@example.com FAULTBOX_ADMIN_PASSWORD=ci-password-123 \
+            ./faultbox > /tmp/faultbox.log 2>&1 &
+          for i in $(seq 1 30); do curl -fsS localhost:8080/ready >/dev/null && break; sleep 1; done
+
+          jar=/tmp/jar
+          token() { grep -o 'name="csrf_token" value="[^"]*"' | head -1 | sed 's/.*value="//;s/"//'; }
+          t=$(curl -s -c $jar -b $jar localhost:8080/login | token)
+          curl -s -c $jar -b $jar -o /dev/null --data-urlencode "csrf_token=$t" \
+            --data-urlencode email=ci@example.com --data-urlencode password=ci-password-123 localhost:8080/login
+          t=$(curl -s -c $jar -b $jar localhost:8080/projects/new | token)
+          key=$(curl -s -c $jar -b $jar --data-urlencode "csrf_token=$t" --data-urlencode "name=SDK contract" \
+            localhost:8080/projects | grep -o 'value="fbx_[0-9A-Za-z]*"' | head -1 | sed 's/value="//;s/"//')
+          test -n "$key"
+          echo "::add-mask::$key"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+
+      - name: E2E suite
+        env:
+          FAULTBOX_E2E_DSN: http://localhost:8080
+          FAULTBOX_E2E_KEY: ${{ steps.server.outputs.key }}
+        run: vendor/bin/phpunit --testsuite E2E --testdox
+
+      - name: Server log
+        if: always()
+        run: cat /tmp/faultbox.log
