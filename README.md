@@ -15,9 +15,14 @@ Reports exceptions and failed queue jobs from Laravel 12 and 13 to a self-hosted
 
 ## Install
 
+Run these commands from your Laravel application's directory. Until the package is published on Packagist, add its Git repository to your application's Composer configuration, then require the `main` branch:
+
 ```bash
-composer require faultbox/laravel
+composer config repositories.faultbox vcs https://github.com/sylvesteragyiri/faultbox-laravel
+composer require faultbox/laravel:dev-main
 ```
+
+After it is published on Packagist, install it with `composer require faultbox/laravel`.
 
 Add your Faultbox server and the project's API key to `.env`. The key is shown once, when you create the project in the dashboard.
 
